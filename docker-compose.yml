@@ -1,0 +1,98 @@
+version: '3.8'
+
+x-airflow-common: &airflow-common
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.airflow
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: ''
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+    AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+    NEWS_API_KEY:     ${NEWS_API_KEY}
+    GCS_BUCKET:       ${GCS_BUCKET}
+    DATABASE_URL:     postgresql://airflow:airflow@postgres:5432/pipeline
+    MODEL_PATH:       /opt/airflow/models/sentiment_model.pkl
+    SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL}
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp-key.json
+  volumes:
+    - ../models:/opt/airflow/models
+    - ${GOOGLE_APPLICATION_CREDENTIALS}:/opt/airflow/gcp-key.json:ro
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER:     airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB:       airflow
+    ports:
+      - '5432:5432'
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', 'airflow']
+      interval: 5s
+      retries: 5
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  airflow-init:
+    <<: *airflow-common
+    command: >
+      bash -c "airflow db init &&
+               airflow users create
+               --username admin --password admin
+               --firstname Uddhav --lastname Rodge
+               --role Admin --email uddhavrodge22@gmail.com"
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: airflow webserver
+    ports:
+      - '8080:8080'
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: airflow scheduler
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  api:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.api
+    ports:
+      - '8000:8000'
+    environment:
+      DATABASE_URL: postgresql://airflow:airflow@postgres:5432/pipeline
+      MODEL_PATH:   /app/models/sentiment_model.pkl
+    volumes:
+      - ../models:/app/models
+    depends_on:
+      - postgres
+
+  dashboard:
+    image: python:3.11-slim
+    working_dir: /app
+    command: >
+      bash -c "pip install -q streamlit pandas psycopg2-binary &&
+               streamlit run monitoring/dashboard.py --server.port 8501 --server.address 0.0.0.0"
+    ports:
+      - '8501:8501'
+    environment:
+      DATABASE_URL: postgresql://airflow:airflow@postgres:5432/pipeline
+    volumes:
+      - ..:/app
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
